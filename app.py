@@ -283,11 +283,13 @@ def get_color_by_intensity(count, max_val, tipo):
 
 def processar_reporte(cep_input, tipo_problema):
     # 0. Validação de Segurança (Cloudflare Strict - Opcional via ENV)
+    # MUDANÇA: Tornamos isso apenas um aviso se falhar, a menos que PROD_MODE esteja ativado explicitamente.
     is_secure, client_ip_or_error = validate_cloudflare_headers()
     
     if not is_secure:
+        # Se falhar a segurança estrita, mostramos erro e paramos.
         st.error(f"⛔ ACESSO NEGADO: Requisição inválida ou insegura.\nDetalhe: {client_ip_or_error}")
-        return # Interrompe execução
+        return 
 
     # 1. Validação de Rate Limit
     allowed, wait_time = check_rate_limit()

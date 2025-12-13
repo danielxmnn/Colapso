@@ -82,33 +82,37 @@ st.markdown("""
 
 def validate_cloudflare_headers():
     """
-    Validação ESTRITA de Segurança.
-    Verifica se a requisição possui os cabeçalhos assinados da Cloudflare.
-    Isso impede acesso direto ao IP do servidor (Bypass de WAF).
+    Validação Flexível de Segurança.
+    Só bloqueia se a variável de ambiente PROD_MODE estiver 'true'.
     """
-    # Em ambiente localhost (desenvolvimento), essa verificação pode falhar.
-    # Para produção, isso é mandatório.
+    # Verifica se estamos em modo PRODUÇÃO ESTRITA
+    strict_mode = os.environ.get("PROD_MODE", "false").lower() == "true"
+    
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
-            
-            # Cabeçalhos que a Cloudflare SEMPRE injeta
             required_headers = ["CF-Connecting-IP", "CF-RAY", "CF-Visitor"]
-            
             missing = [h for h in required_headers if h not in headers]
             
             if missing:
-                # Se faltar cabeçalhos, é um acesso direto suspeito ou local
-                return False, f"Acesso Direto Bloqueado. Headers ausentes: {missing}"
+                if strict_mode:
+                    return False, f"Bloqueio de Segurança (Prod). Headers ausentes: {missing}"
+                else:
+                    # Em modo Dev/Deploy inicial, permite mas avisa no log
+                    print(f"⚠️ AVISO: Acesso direto detectado (Headers: {missing}). Permitido pois PROD_MODE != true.")
+                    return True, "Dev Mode (Direct Access)"
             
             return True, headers["CF-Connecting-IP"]
             
-        # Fallback para versões antigas do Streamlit ou execução local sem contexto
-        # Em produção estrita, retornamos False para garantir segurança.
-        # Para testar localmente, altere para True temporariamente.
-        return False, "Contexto de cabeçalhos não disponível."
+        # Fallback para ambiente local
+        if strict_mode:
+            return False, "Contexto de cabeçalhos indisponível em PROD_MODE."
+        return True, "Localhost/Dev"
+        
     except Exception as e:
-        return False, str(e)
+        if strict_mode:
+            return False, str(e)
+        return True, f"Erro ignorado em Dev: {e}"
 
 def check_rate_limit():
     """
@@ -278,7 +282,7 @@ def get_color_by_intensity(count, max_val, tipo):
         return '#0d47a1'
 
 def processar_reporte(cep_input, tipo_problema):
-    # 0. Validação de Segurança (Cloudflare Strict)
+    # 0. Validação de Segurança (Cloudflare Strict - Opcional via ENV)
     is_secure, client_ip_or_error = validate_cloudflare_headers()
     
     if not is_secure:

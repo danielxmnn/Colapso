@@ -177,7 +177,9 @@ def normalize_text(text):
     text = text.upper()
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
-@st.cache_data
+# USAR cache_resource para manter o GeoDataFrame em memória RAM do servidor
+# Isso evita recarregar o arquivo e converter CRS a cada interação
+@st.cache_resource
 def load_geosampa_data():
     local_files = ["SIRGAS_GPKG_distrito.zip", "SIRGAS_GPKG_distrito.gpkg"]
     for filename in local_files:
@@ -187,16 +189,30 @@ def load_geosampa_data():
                 if filename.endswith(".zip"):
                     file_path = f"zip://{filename}"
                 
+                # Lê APENAS o GeoDataFrame, não converte para JSON ainda (economiza memória)
                 gdf = gpd.read_file(file_path)
+                
+                # Otimização: Filtra colunas desnecessárias se houver muitas
+                # gdf = gdf[['ds_nome', 'geometry']] # Exemplo se souber os nomes exatos
+                
                 if gdf.crs != "EPSG:4326":
                     gdf = gdf.to_crs("EPSG:4326")
-                return json.loads(gdf.to_json())
+                
+                # Cria uma coluna normalizada para busca rápida
+                # Tenta achar a coluna de nome (pode variar dependendo da versão do arquivo)
+                possible_cols = ['ds_nome', 'nm_distrito', 'name', 'NOME_DIST']
+                name_col = next((c for c in possible_cols if c in gdf.columns), None)
+                
+                if name_col:
+                    gdf['norm_name'] = gdf[name_col].apply(normalize_text)
+                
+                return gdf, name_col
+                
             except Exception as e:
-                # Em produção, logar o erro internamente em vez de mostrar ao usuário
                 print(f"Erro no carregamento local: {e}")
     
-    st.error("⚠️ ERRO DE CONFIGURAÇÃO: Base cartográfica não encontrada. Contate o suporte.")
-    return None
+    st.error("⚠️ ERRO: Base cartográfica não encontrada.")
+    return None, None
 
 def get_district_from_db(cep_str):
     try:
@@ -208,44 +224,49 @@ def get_district_from_db(cep_str):
         pass
     return None, None
 
-def get_district_geometry_from_base(distrito_nome, geojson_data):
-    if not geojson_data: return None, None
+def get_district_geometry_from_base(distrito_nome, base_data):
+    """
+    Busca o polígono filtrando o GeoDataFrame diretamente.
+    Retorna apenas o JSON do distrito específico, economizando memória.
+    """
+    gdf, name_col = base_data
+    if gdf is None or name_col is None: return None, None
+    
     target_name = normalize_text(distrito_nome)
     
-    for feature in geojson_data['features']:
-        props = feature.get('properties', {})
-        feature_name = normalize_text(
-            props.get('ds_nome', '') or props.get('nm_distrito', '') or 
-            props.get('name', '') or props.get('NOME_DIST', '')
-        )
-        
-        if target_name == feature_name or (target_name in feature_name and len(target_name) > 3):
-            try:
-                if feature['geometry']['type'] == 'Polygon':
-                    coords = feature['geometry']['coordinates'][0][0]
-                elif feature['geometry']['type'] == 'MultiPolygon':
-                    coords = feature['geometry']['coordinates'][0][0][0]
-                else:
-                    coords = [-46.6333, -23.5505]
-                return feature, [coords[1], coords[0]]
-            except:
-                return feature, [-23.5505, -46.6333]
+    # Filtro eficiente do Pandas (muito mais rápido e leve que iterar JSON)
+    # Busca exata ou 'contains' se necessário
+    match = gdf[gdf['norm_name'] == target_name]
+    
+    if match.empty:
+        # Tenta busca parcial se exata falhar
+        match = gdf[gdf['norm_name'].str.contains(target_name, na=False)]
+    
+    if not match.empty:
+        try:
+            # Pega o primeiro resultado
+            feature = match.iloc[0]
+            
+            # Converte APENAS este distrito para GeoJSON
+            # Isso é leve e não estoura a memória
+            feature_json = json.loads(gpd.GeoSeries([feature.geometry]).to_json())
+            
+            # Ajusta estrutura para o formato que o Folium espera (FeatureCollection -> features[0])
+            geojson_feature = feature_json['features'][0]
+            
+            # Calcula centróide
+            centroid = feature.geometry.centroid
+            return geojson_feature, [centroid.y, centroid.x]
+        except Exception as e:
+            print(f"Erro ao extrair geometria: {e}")
+            return None, [-23.5505, -46.6333]
+            
     return None, None
 
-def get_color_by_intensity(count, max_val, tipo):
-    ratio = count / max_val if max_val > 0 else 0
-    if tipo == "Falta de Luz":
-        if ratio < 0.2: return '#bdbdbd'
-        if ratio < 0.4: return '#969696'
-        if ratio < 0.6: return '#737373'
-        if ratio < 0.8: return '#525252'
-        return '#000000'
-    else:
-        if ratio < 0.2: return '#bbdefb'
-        if ratio < 0.4: return '#64b5f6'
-        if ratio < 0.6: return '#2196f3'
-        if ratio < 0.8: return '#1565c0'
-        return '#0d47a1'
+# Carrega a base
+# NOTA: O carregamento agora é 'Lazy' ou eficiente via cache_resource
+# Isso impede o Timeout na inicialização do app
+BASE_DATA = load_geosampa_data()
 
 def processar_reporte(cep_input, tipo_problema):
     # 1. Validação de Rate Limit
@@ -265,13 +286,11 @@ def processar_reporte(cep_input, tipo_problema):
         return
 
     # 3. Processamento
-    BASE_GEOJSON = load_geosampa_data()
-    if not BASE_GEOJSON: return
-
     distrito_db, zona_db = get_district_from_db(clean_cep)
     
     if distrito_db:
-        geojson, coords = get_district_geometry_from_base(distrito_db, BASE_GEOJSON)
+        # Busca geometria otimizada
+        geojson, coords = get_district_geometry_from_base(distrito_db, BASE_DATA)
         
         lat, lon = coords if coords else (-23.5505, -46.6333)
         

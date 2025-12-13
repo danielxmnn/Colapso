@@ -1,10 +1,20 @@
 import streamlit as st
+import os
 
 # Configuração básica
-st.set_page_config(page_title="Teste Conexão", page_icon="🟢")
+st.set_page_config(page_title="Teste de Porta", page_icon="🔌")
 
-# Conteúdo Mínimo
-st.title("🟢 Servidor Online!")
-st.success("Se você vê esta mensagem, a conexão HTTP, o Docker e o Streamlit estão funcionando perfeitamente.")
+# Conteúdo de Diagnóstico
+st.title("🔌 Conexão Estabelecida!")
 
-st.write("O erro 502 anterior foi causado provavelmente pelo peso das bibliotecas geográficas (GeoPandas/GDAL) estourando a memória na inicialização.")
+# Mostra qual porta o servidor escolheu (Debug)
+port_used = os.environ.get("PORT", "8501 (Padrão)")
+
+st.success(f"""
+### Status: ONLINE
+O servidor web subiu corretamente.
+- **Porta Detectada:** {port_used}
+- **Endereço:** 0.0.0.0
+""")
+
+st.info("Agora que confirmamos que o deploy funciona, podemos voltar a adicionar as bibliotecas de mapa (GeoPandas) e o código completo.")

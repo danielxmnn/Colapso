@@ -12,24 +12,28 @@ from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut
 import streamlit.components.v1 as components
 
-# --- CONFIGURAÇÃO INICIAL ---
 st.set_page_config(
     page_title="Monitor de Colapso Urbano",
     page_icon="🚨",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed",
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': None
+    }
 )
 
-# --- CSS PERSONALIZADO (PRODUÇÃO) ---
 st.markdown("""
 <style>
-    /* --- REMOVE MENU DE DESENVOLVEDOR E RODAPÉ STREAMLIT --- */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    [data-testid="stToolbar"] {visibility: hidden;} /* Remove barra de deploy superior */
+    [data-testid="stToolbar"] {visibility: hidden;}
+    [data-testid="stDecoration"] {display: none;}
+    [data-testid="stSidebar"] {display: none;}
+    [data-testid="collapsedControl"] {display: none;}
     
-    /* Botões */
     .stButton>button {
         width: 100%;
         background-color: #2c2c2c;
@@ -44,7 +48,6 @@ st.markdown("""
         border-color: #666;
     }
     
-    /* Cards de Métricas */
     .metric-card {
         background-color: #111;
         padding: 20px;
@@ -70,7 +73,6 @@ st.markdown("""
         font-weight: 600;
     }
 
-    /* Container de Publicidade */
     .ad-container {
         background-color: #f0f2f6;
         border: 1px solid #e0e0e0;
@@ -86,13 +88,10 @@ st.markdown("""
         font-size: 0.8em;
     }
     
-    /* Ajustes Gerais */
     .block-container { padding-top: 2rem; }
     h1, h2, h3 { color: #eee; }
 </style>
 """, unsafe_allow_html=True)
-
-# --- FUNÇÕES AUXILIARES ---
 
 def normalize_text(text):
     if not isinstance(text, str): return ""
@@ -100,17 +99,14 @@ def normalize_text(text):
     return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
 
 def get_color_by_intensity(count, max_val, tipo):
-    """Define a cor do polígono baseada na intensidade e tipo do problema."""
     ratio = count / max_val if max_val > 0 else 0
     if tipo == "Falta de Luz":
-        # Gradiente PRETO/CINZA
         if ratio < 0.2: return '#bdbdbd'
         if ratio < 0.4: return '#969696'
         if ratio < 0.6: return '#737373'
         if ratio < 0.8: return '#525252'
         return '#000000'
     else:
-        # Gradiente AZUL
         if ratio < 0.2: return '#bbdefb'
         if ratio < 0.4: return '#64b5f6'
         if ratio < 0.6: return '#2196f3'
@@ -118,7 +114,6 @@ def get_color_by_intensity(count, max_val, tipo):
         return '#0d47a1'
 
 def check_rate_limit():
-    """Impede spam limitando envios a 1 a cada 60s por sessão."""
     now = datetime.now()
     if 'last_submission' in st.session_state:
         delta = (now - st.session_state['last_submission']).total_seconds()
@@ -128,7 +123,6 @@ def check_rate_limit():
     return True, 0
 
 def manutencao_dados_antigos():
-    """Remove reportes > 96h."""
     if 'reports' in st.session_state and st.session_state['reports']:
         agora = datetime.now()
         limite = agora - timedelta(hours=96)
@@ -138,7 +132,6 @@ def manutencao_dados_antigos():
         ]
 
 def buscar_cep_por_endereco(endereco):
-    """Busca CEP via Nominatim (OpenStreetMap)."""
     geolocator = Nominatim(user_agent="monitor_colapso_urbano_v1")
     try:
         query = f"{endereco}, Brazil"
@@ -149,11 +142,9 @@ def buscar_cep_por_endereco(endereco):
             cep = address_info.get('postcode')
             if cep:
                 return cep.replace("-", "").replace(" ", "")
-    except Exception as e:
-        print(f"Erro na busca de endereço: {e}")
+    except Exception:
+        pass
     return None
-
-# --- GERENCIAMENTO DE ESTADO ---
 
 if 'reports' not in st.session_state:
     st.session_state['reports'] = []
@@ -168,8 +159,6 @@ if 'cep_value' not in st.session_state:
     st.session_state['cep_value'] = ""
 
 manutencao_dados_antigos()
-
-# --- CARREGAMENTO DE DADOS (SP) ---
 
 @st.cache_resource
 def load_geosampa_data():
@@ -196,7 +185,6 @@ def load_geosampa_data():
 
 BASE_DATA_SP = load_geosampa_data()
 
-# --- BANCO DE DADOS DE CEPS (SP CAPITAL) ---
 SP_CEP_DB = [
     {'min': 1000, 'max': 1099, 'dist': 'Sé', 'zona': 'Centro'},
     {'min': 1100, 'max': 1199, 'dist': 'Bom Retiro', 'zona': 'Centro'},
@@ -251,7 +239,6 @@ SP_CEP_DB = [
 ]
 
 def get_data_from_brasilapi(cep):
-    """Fallback Nacional."""
     try:
         url = f"https://brasilapi.com.br/api/cep/v2/{cep}"
         response = requests.get(url, timeout=3)
@@ -266,12 +253,11 @@ def get_data_from_brasilapi(cep):
                 uf = data.get('state', 'BR')
                 if lat != 0 and lon != 0:
                     return bairro, cidade, uf, lat, lon
-    except Exception as e:
-        print(f"Erro BrasilAPI: {e}")
+    except Exception:
+        pass
     return None
 
 def get_district_geometry_sp(distrito_nome, base_data):
-    """Geometria para SP."""
     gdf, name_col = base_data
     if gdf is None or name_col is None: return None, None
     target_name = normalize_text(distrito_nome)
@@ -292,13 +278,11 @@ def get_district_geometry_sp(distrito_nome, base_data):
     return None, None
 
 def processar_reporte(cep_input, tipo_problema):
-    # 1. Rate Limit
     allowed, wait_time = check_rate_limit()
     if not allowed:
         st.warning(f"⏳ Aguarde {wait_time}s.")
         return
 
-    # 2. Input
     if not cep_input:
         st.warning("⚠️ Digite um CEP.")
         return
@@ -307,7 +291,6 @@ def processar_reporte(cep_input, tipo_problema):
         st.error("❌ CEP Inválido.")
         return
 
-    # 3. Lógica Híbrida (SP vs Nacional)
     sp_data = None
     try:
         prefix = int(clean_cep[:5])
@@ -319,7 +302,6 @@ def processar_reporte(cep_input, tipo_problema):
         pass
 
     if sp_data:
-        # SP Capital
         distrito = sp_data['dist']
         zona = sp_data['zona']
         cidade = "São Paulo"
@@ -328,7 +310,6 @@ def processar_reporte(cep_input, tipo_problema):
         lat, lon = coords if coords else (-23.5505, -46.6333)
         has_geometry = bool(geojson)
     else:
-        # Resto do Brasil (BrasilAPI)
         api_data = get_data_from_brasilapi(clean_cep)
         if api_data:
             distrito, cidade, uf, lat, lon = api_data
@@ -339,7 +320,6 @@ def processar_reporte(cep_input, tipo_problema):
             st.error("❌ CEP não encontrado na base nacional.")
             return
 
-    # 4. Salvar
     st.session_state['reports'].append({
         'lat': lat,
         'lon': lon,
@@ -360,21 +340,14 @@ def processar_reporte(cep_input, tipo_problema):
     
     st.success(f"✅ Registrado: {distrito} - {cidade}/{uf}")
 
-# --- INTERFACE ---
-
 st.title("Monitor de Colapso Urbano")
 
-# ÁREA DE PUBLICIDADE (ADSENSE REAL)
 def render_ad_header():
-    # ID do Cliente: ca-pub-9651406703551753
-    # NOTA: O 'data-ad-slot' deve ser preenchido após criar o bloco de anúncios no painel do Google.
     ad_html = """
     <div class="ad-container">
-        <meta name="google-adsense-account" content="ca-pub-9651406703551753">
         <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-9651406703551753"
              crossorigin="anonymous"></script>
         
-        <!-- Bloco de Anúncio -->
         <ins class="adsbygoogle"
              style="display:block"
              data-ad-client="ca-pub-9651406703551753"
@@ -402,7 +375,6 @@ with col1:
         horizontal=True
     )
     
-    # Busca de Endereço
     with st.expander("📍 Não sabe o CEP? Buscar por endereço"):
         end_busca = st.text_input("Endereço (Ex: Av. Paulista, 1000, SP)")
         if st.button("🔍 Pesquisar CEP"):

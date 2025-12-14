@@ -23,6 +23,12 @@ st.set_page_config(
 # --- CSS PERSONALIZADO (PRODUÇÃO) ---
 st.markdown("""
 <style>
+    /* --- REMOVE MENU DE DESENVOLVEDOR E RODAPÉ STREAMLIT --- */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    [data-testid="stToolbar"] {visibility: hidden;} /* Remove barra de deploy superior */
+    
     /* Botões */
     .stButton>button {
         width: 100%;

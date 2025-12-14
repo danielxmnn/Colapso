@@ -8,10 +8,11 @@ import geopandas as gpd
 import os
 import requests
 from datetime import datetime, timedelta
-# Importação necessária para renderizar scripts de anúncios (AdSense) dentro do Streamlit
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 import streamlit.components.v1 as components
 
-# --- CONFIGURAÇÃO INICIAL E SEGURANÇA ---
+# --- CONFIGURAÇÃO INICIAL ---
 st.set_page_config(
     page_title="Monitor de Colapso Urbano",
     page_icon="🚨",
@@ -63,7 +64,7 @@ st.markdown("""
         font-weight: 600;
     }
 
-    /* Container de Publicidade (AdSense Placeholder) */
+    /* Container de Publicidade */
     .ad-container {
         background-color: #f0f2f6;
         border: 1px solid #e0e0e0;
@@ -96,22 +97,22 @@ def get_color_by_intensity(count, max_val, tipo):
     """Define a cor do polígono baseada na intensidade e tipo do problema."""
     ratio = count / max_val if max_val > 0 else 0
     if tipo == "Falta de Luz":
-        # Gradiente PRETO/CINZA (Apagão)
+        # Gradiente PRETO/CINZA
         if ratio < 0.2: return '#bdbdbd'
         if ratio < 0.4: return '#969696'
         if ratio < 0.6: return '#737373'
         if ratio < 0.8: return '#525252'
         return '#000000'
     else:
-        # Gradiente AZUL (Água)
-        if ratio < 0.2: return '#bbdefb' # Azul muito claro
-        if ratio < 0.4: return '#64b5f6' # Azul claro
-        if ratio < 0.6: return '#2196f3' # Azul médio
-        if ratio < 0.8: return '#1565c0' # Azul escuro
-        return '#0d47a1'                 # Azul marinho profundo
+        # Gradiente AZUL
+        if ratio < 0.2: return '#bbdefb'
+        if ratio < 0.4: return '#64b5f6'
+        if ratio < 0.6: return '#2196f3'
+        if ratio < 0.8: return '#1565c0'
+        return '#0d47a1'
 
 def check_rate_limit():
-    """Impede spam limitando envios."""
+    """Impede spam limitando envios a 1 a cada 60s por sessão."""
     now = datetime.now()
     if 'last_submission' in st.session_state:
         delta = (now - st.session_state['last_submission']).total_seconds()
@@ -121,7 +122,7 @@ def check_rate_limit():
     return True, 0
 
 def manutencao_dados_antigos():
-    """Remove reportes > 96h (Política de Retenção)."""
+    """Remove reportes > 96h."""
     if 'reports' in st.session_state and st.session_state['reports']:
         agora = datetime.now()
         limite = agora - timedelta(hours=96)
@@ -130,21 +131,39 @@ def manutencao_dados_antigos():
             if r.get('timestamp', agora) > limite
         ]
 
+def buscar_cep_por_endereco(endereco):
+    """Busca CEP via Nominatim (OpenStreetMap)."""
+    geolocator = Nominatim(user_agent="monitor_colapso_urbano_v1")
+    try:
+        query = f"{endereco}, Brazil"
+        location = geolocator.geocode(query, addressdetails=True, timeout=10)
+        
+        if location:
+            address_info = location.raw.get('address', {})
+            cep = address_info.get('postcode')
+            if cep:
+                return cep.replace("-", "").replace(" ", "")
+    except Exception as e:
+        print(f"Erro na busca de endereço: {e}")
+    return None
+
 # --- GERENCIAMENTO DE ESTADO ---
 
 if 'reports' not in st.session_state:
     st.session_state['reports'] = []
 
 if 'center_map' not in st.session_state:
-    st.session_state['center_map'] = [-23.5505, -46.6333] # Default SP
+    st.session_state['center_map'] = [-23.5505, -46.6333]
 
 if 'geometries' not in st.session_state:
     st.session_state['geometries'] = {}
 
-# Executa manutenção na inicialização
+if 'cep_value' not in st.session_state:
+    st.session_state['cep_value'] = ""
+
 manutencao_dados_antigos()
 
-# --- CARREGAMENTO DE DADOS (SP LOCAL) ---
+# --- CARREGAMENTO DE DADOS (SP) ---
 
 @st.cache_resource
 def load_geosampa_data():
@@ -157,28 +176,21 @@ def load_geosampa_data():
                     file_path = f"zip://{filename}"
                 
                 gdf = gpd.read_file(file_path)
-                
                 if gdf.crs != "EPSG:4326":
                     gdf = gdf.to_crs("EPSG:4326")
                 
                 possible_cols = ['ds_nome', 'nm_distrito', 'name', 'NOME_DIST']
                 name_col = next((c for c in possible_cols if c in gdf.columns), None)
-                
                 if name_col:
                     gdf['norm_name'] = gdf[name_col].apply(normalize_text)
-                
                 return gdf, name_col
-                
             except Exception as e:
                 print(f"Erro no carregamento local: {e}")
-    
-    # Se não achar o arquivo local, não quebra o app, apenas desativa a geometria detalhada
     return None, None
 
-# Carrega a base local de SP
 BASE_DATA_SP = load_geosampa_data()
 
-# --- BANCO DE DADOS DE CEPS (SP CAPITAL - OTIMIZADO) ---
+# --- BANCO DE DADOS DE CEPS (SP CAPITAL) ---
 SP_CEP_DB = [
     {'min': 1000, 'max': 1099, 'dist': 'Sé', 'zona': 'Centro'},
     {'min': 1100, 'max': 1199, 'dist': 'Bom Retiro', 'zona': 'Centro'},
@@ -233,10 +245,7 @@ SP_CEP_DB = [
 ]
 
 def get_data_from_brasilapi(cep):
-    """
-    Fallback Nacional: Consulta BrasilAPI para CEPs fora da base local de SP.
-    Retorna (bairro, cidade, uf, lat, lon)
-    """
+    """Fallback Nacional."""
     try:
         url = f"https://brasilapi.com.br/api/cep/v2/{cep}"
         response = requests.get(url, timeout=3)
@@ -246,11 +255,9 @@ def get_data_from_brasilapi(cep):
                 coords = data['location']['coordinates']
                 lat = float(coords.get('latitude', 0))
                 lon = float(coords.get('longitude', 0))
-                
                 bairro = data.get('neighborhood', 'Centro')
                 cidade = data.get('city', 'Cidade')
                 uf = data.get('state', 'BR')
-                
                 if lat != 0 and lon != 0:
                     return bairro, cidade, uf, lat, lon
     except Exception as e:
@@ -258,12 +265,9 @@ def get_data_from_brasilapi(cep):
     return None
 
 def get_district_geometry_sp(distrito_nome, base_data):
-    """
-    Tenta pegar a geometria detalhada do arquivo local (Apenas SP Capital).
-    """
+    """Geometria para SP."""
     gdf, name_col = base_data
     if gdf is None or name_col is None: return None, None
-    
     target_name = normalize_text(distrito_nome)
     
     match = gdf[gdf['norm_name'] == target_name]
@@ -288,7 +292,7 @@ def processar_reporte(cep_input, tipo_problema):
         st.warning(f"⏳ Aguarde {wait_time}s.")
         return
 
-    # 2. Input e Sanitização
+    # 2. Input
     if not cep_input:
         st.warning("⚠️ Digite um CEP.")
         return
@@ -297,9 +301,7 @@ def processar_reporte(cep_input, tipo_problema):
         st.error("❌ CEP Inválido.")
         return
 
-    # 3. Lógica de Roteamento (SP vs Brasil)
-    
-    # A) Tenta base local de SP primeiro (Mais rápido e detalhado)
+    # 3. Lógica Híbrida (SP vs Nacional)
     sp_data = None
     try:
         prefix = int(clean_cep[:5])
@@ -311,31 +313,27 @@ def processar_reporte(cep_input, tipo_problema):
         pass
 
     if sp_data:
-        # É SP Capital -> Usa Geometria Local
+        # SP Capital
         distrito = sp_data['dist']
         zona = sp_data['zona']
         cidade = "São Paulo"
         uf = "SP"
-        
         geojson, coords = get_district_geometry_sp(distrito, BASE_DATA_SP)
         lat, lon = coords if coords else (-23.5505, -46.6333)
         has_geometry = bool(geojson)
-        
     else:
-        # B) Não é SP Capital -> Usa BrasilAPI (Nacional)
-        # Atenção: BrasilAPI pode falhar ou demorar, tratamos isso.
+        # Resto do Brasil (BrasilAPI)
         api_data = get_data_from_brasilapi(clean_cep)
-        
         if api_data:
             distrito, cidade, uf, lat, lon = api_data
             zona = f"{cidade}/{uf}"
-            geojson = None # Sem polígono para fora de SP (usa Círculo)
+            geojson = None
             has_geometry = False
         else:
             st.error("❌ CEP não encontrado na base nacional.")
             return
 
-    # 4. Salva o Reporte
+    # 4. Salvar
     st.session_state['reports'].append({
         'lat': lat,
         'lon': lon,
@@ -346,13 +344,10 @@ def processar_reporte(cep_input, tipo_problema):
         'uf': uf,
         'type': tipo_problema,
         'timestamp': datetime.now(),
-        'has_geometry': has_geometry # Flag para saber como desenhar
+        'has_geometry': has_geometry
     })
     
-    # Centraliza o mapa no novo ponto
     st.session_state['center_map'] = [lat, lon]
-    
-    # Salva geometria no cache apenas se existir (SP)
     if has_geometry and geojson:
         key = f"{distrito} - {cidade}"
         st.session_state['geometries'][key] = geojson
@@ -363,36 +358,30 @@ def processar_reporte(cep_input, tipo_problema):
 
 st.title("Monitor de Colapso Urbano")
 
-# --- ÁREA DE PUBLICIDADE (ADSENSE REAL) ---
+# ÁREA DE PUBLICIDADE (ADSENSE REAL)
 def render_ad_header():
-    """
-    Renderiza o bloco de anúncios do Google AdSense.
-    """
-    # Substitua pelos seus dados reais do Google AdSense
-    # data-ad-client="ca-pub-SEU_ID_AQUI"
-    # data-ad-slot="SEU_SLOT_AQUI"
-    
+    # ID do Cliente: ca-pub-9651406703551753
+    # ATENÇÃO: Você precisa gerar um 'data-ad-slot' (ID do bloco) no painel do Google AdSense e colar abaixo.
     ad_html = """
     <div class="ad-container">
-        <!-- Google AdSense Placeholder -->
-        <!-- Cole seu script do AdSense aqui -->
-        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXX"
+        <meta name="google-adsense-account" content="ca-pub-9651406703551753">
+        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-9651406703551753"
              crossorigin="anonymous"></script>
+        
+        <!-- Bloco de Anúncio -->
         <ins class="adsbygoogle"
              style="display:block"
-             data-ad-client="ca-pub-XXXXXXXXXXXXXX"
+             data-ad-client="ca-pub-9651406703551753"
              data-ad-slot="XXXXXXXXXX"
              data-ad-format="auto"
              data-full-width-responsive="true"></ins>
         <script>
              (adsbygoogle = window.adsbygoogle || []).push({});
         </script>
-        <div style="padding:10px; color:#999; font-size:12px;">Publicidade (Google Ads)</div>
+        <div style="padding:5px; color:#999; font-size:10px;">Publicidade (Google Ads)</div>
     </div>
     """
-    
-    # Usa html puro se possível, ou component isolado para script
-    components.html(ad_html, height=120)
+    components.html(ad_html, height=140)
 
 render_ad_header()
 
@@ -407,20 +396,31 @@ with col1:
         horizontal=True
     )
     
-    cep_input = st.text_input("CEP (Somente números)", placeholder="00000000", max_chars=8)
+    # Busca de Endereço
+    with st.expander("📍 Não sabe o CEP? Buscar por endereço"):
+        end_busca = st.text_input("Endereço (Ex: Av. Paulista, 1000, SP)")
+        if st.button("🔍 Pesquisar CEP"):
+            with st.spinner("Buscando..."):
+                cep_encontrado = buscar_cep_por_endereco(end_busca)
+                if cep_encontrado:
+                    st.session_state['cep_value'] = cep_encontrado
+                    st.success(f"CEP: {cep_encontrado}")
+                    st.rerun()
+                else:
+                    st.error("Endereço não localizado.")
+
+    cep_input = st.text_input(
+        "CEP (Somente números)", 
+        value=st.session_state['cep_value'],
+        placeholder="00000000", 
+        max_chars=8,
+        key="cep_input_widget"
+    )
     
     if st.button("📢 Confirmar"):
         processar_reporte(cep_input, tipo_problema)
     
     st.markdown("---")
-    
-    # Botão de Doação
-    st.markdown("""
-    <div style="text-align: center; padding: 10px; background-color: #222; border-radius: 8px; margin-bottom: 20px;">
-        <p style="color: #fff; margin: 0; font-weight: bold; font-size: 0.9em;">Ajude a manter o servidor:</p>
-        <a href="#" style="color: #4CAF50; font-weight: bold; text-decoration: none; font-size: 1.1em;">☕ Doar com PIX</a>
-    </div>
-    """, unsafe_allow_html=True)
     
     df_all = pd.DataFrame(st.session_state['reports'])
     if not df_all.empty and 'type' not in df_all.columns:
@@ -437,7 +437,6 @@ with col1:
         """, unsafe_allow_html=True)
         
         st.subheader("Locais Críticos")
-        # Agrupa por Região e Cidade para cobrir Brasil todo
         ranking = df_filtered.groupby(['cidade', 'uf', 'regiao']).size().reset_index(name='Qtd')
         ranking = ranking.sort_values(by='Qtd', ascending=False)
         
@@ -468,7 +467,6 @@ with col2:
     )
 
     if not df_filtered.empty:
-        # Agrupa dados para plotar
         grouped = df_filtered.groupby(['regiao', 'cidade']).agg({
             'lat': 'first', 'lon': 'first', 'type': 'count', 'has_geometry': 'first'
         }).rename(columns={'type': 'count'}).reset_index()
@@ -476,40 +474,26 @@ with col2:
         max_reports = grouped['count'].max()
         
         for _, row in grouped.iterrows():
-            regiao_nome = row['regiao']
-            cidade_nome = row['cidade']
             count = row['count']
             has_geom = row['has_geometry']
-            
+            key = f"{row['regiao']} - {row['cidade']}"
+            geojson_data = st.session_state['geometries'].get(key) if has_geom else None
             fill_color = get_color_by_intensity(count, max_reports, tipo_problema)
             
-            # Tenta desenhar Geometria (SP) ou Círculo (Resto do Brasil)
-            key = f"{regiao_nome} - {cidade_nome}"
-            geojson_data = st.session_state['geometries'].get(key) if has_geom else None
-            
             if geojson_data:
-                # Estilo Polígono (SP)
                 folium.GeoJson(
                     geojson_data,
                     style_function=lambda x, color=fill_color: {
-                        'fillColor': color,
-                        'color': '#ffffff',
-                        'weight': 2,
-                        'fillOpacity': 0.6
+                        'fillColor': color, 'color': '#ffffff', 'weight': 2, 'fillOpacity': 0.6
                     },
-                    tooltip=f"{regiao_nome}: {count}"
+                    tooltip=f"{row['regiao']}: {count}"
                 ).add_to(m)
             else:
-                # Estilo Ponto/Círculo (Brasil)
                 folium.Circle(
                     location=[row['lat'], row['lon']],
-                    radius=800, # 800m raio
-                    color='#ffffff',
-                    weight=2,
-                    fill=True,
-                    fill_color=fill_color,
-                    fill_opacity=0.6,
-                    tooltip=f"{regiao_nome} ({cidade_nome}): {count}"
+                    radius=800, color='#ffffff', weight=2, fill=True,
+                    fill_color=fill_color, fill_opacity=0.6,
+                    tooltip=f"{row['regiao']}: {count}"
                 ).add_to(m)
         
     st_folium(m, width="100%", height=600)

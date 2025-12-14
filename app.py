@@ -361,7 +361,7 @@ st.title("Monitor de Colapso Urbano")
 # ÁREA DE PUBLICIDADE (ADSENSE REAL)
 def render_ad_header():
     # ID do Cliente: ca-pub-9651406703551753
-    # ATENÇÃO: Você precisa gerar um 'data-ad-slot' (ID do bloco) no painel do Google AdSense e colar abaixo.
+    # NOTA: O 'data-ad-slot' deve ser preenchido após criar o bloco de anúncios no painel do Google.
     ad_html = """
     <div class="ad-container">
         <meta name="google-adsense-account" content="ca-pub-9651406703551753">

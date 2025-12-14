@@ -78,22 +78,52 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE SEGURANÇA E REDE ---
+# --- FUNÇÕES AUXILIARES (DEFINIDAS NO TOPO PARA EVITAR NAMEERROR) ---
+
+def normalize_text(text):
+    if not isinstance(text, str): return ""
+    text = text.upper()
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+
+def get_color_by_intensity(count, max_val, tipo):
+    """Define a cor do polígono baseada na intensidade e tipo do problema."""
+    ratio = count / max_val if max_val > 0 else 0
+    if tipo == "Falta de Luz":
+        # Gradiente PRETO/CINZA (Apagão)
+        if ratio < 0.2: return '#bdbdbd'
+        if ratio < 0.4: return '#969696'
+        if ratio < 0.6: return '#737373'
+        if ratio < 0.8: return '#525252'
+        return '#000000'
+    else:
+        # Gradiente AZUL (Água)
+        if ratio < 0.2: return '#bbdefb' # Azul muito claro
+        if ratio < 0.4: return '#64b5f6' # Azul claro
+        if ratio < 0.6: return '#2196f3' # Azul médio
+        if ratio < 0.8: return '#1565c0' # Azul escuro
+        return '#0d47a1'                 # Azul marinho profundo
 
 def check_rate_limit():
-    """
-    Impede spam limitando envios a 1 a cada 60 segundos por sessão.
-    """
+    """Impede spam limitando envios."""
     now = datetime.now()
     if 'last_submission' in st.session_state:
         delta = (now - st.session_state['last_submission']).total_seconds()
         if delta < 60:
             return False, int(60 - delta)
-    
     st.session_state['last_submission'] = now
     return True, 0
 
-# --- GERENCIAMENTO DE ESTADO E DADOS ---
+def manutencao_dados_antigos():
+    """Remove reportes > 96h (Política de Retenção)."""
+    if 'reports' in st.session_state and st.session_state['reports']:
+        agora = datetime.now()
+        limite = agora - timedelta(hours=96)
+        st.session_state['reports'] = [
+            r for r in st.session_state['reports'] 
+            if r.get('timestamp', agora) > limite
+        ]
+
+# --- GERENCIAMENTO DE ESTADO ---
 
 if 'reports' not in st.session_state:
     st.session_state['reports'] = []
@@ -104,17 +134,44 @@ if 'center_map' not in st.session_state:
 if 'geometries' not in st.session_state:
     st.session_state['geometries'] = {}
 
-def manutencao_dados_antigos():
-    """Remove reportes > 96h (Política de Retenção)."""
-    if st.session_state['reports']:
-        agora = datetime.now()
-        limite = agora - timedelta(hours=96)
-        st.session_state['reports'] = [
-            r for r in st.session_state['reports'] 
-            if r.get('timestamp', agora) > limite
-        ]
-
+# Executa manutenção na inicialização
 manutencao_dados_antigos()
+
+# --- CARREGAMENTO DE DADOS E GEOMETRIA ---
+
+# USAR cache_resource para manter o GeoDataFrame em memória RAM do servidor
+@st.cache_resource
+def load_geosampa_data():
+    local_files = ["SIRGAS_GPKG_distrito.zip", "SIRGAS_GPKG_distrito.gpkg"]
+    for filename in local_files:
+        if os.path.exists(filename):
+            try:
+                file_path = filename
+                if filename.endswith(".zip"):
+                    file_path = f"zip://{filename}"
+                
+                # Lê APENAS o GeoDataFrame
+                gdf = gpd.read_file(file_path)
+                
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+                
+                # Cria coluna normalizada
+                possible_cols = ['ds_nome', 'nm_distrito', 'name', 'NOME_DIST']
+                name_col = next((c for c in possible_cols if c in gdf.columns), None)
+                
+                if name_col:
+                    gdf['norm_name'] = gdf[name_col].apply(normalize_text)
+                
+                return gdf, name_col
+                
+            except Exception as e:
+                print(f"Erro no carregamento local: {e}")
+    
+    return None, None
+
+# Carrega a base uma vez (Lazy Loading global)
+BASE_DATA = load_geosampa_data()
 
 # --- BANCO DE DADOS DE CEPS (Compactado) ---
 SP_CEP_DB = [
@@ -170,50 +227,6 @@ SP_CEP_DB = [
     {'min': 8400, 'max': 8499, 'dist': 'Guaianases', 'zona': 'Zona Leste'},
 ]
 
-# --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
-
-def normalize_text(text):
-    if not isinstance(text, str): return ""
-    text = text.upper()
-    return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
-
-# USAR cache_resource para manter o GeoDataFrame em memória RAM do servidor
-# Isso evita recarregar o arquivo e converter CRS a cada interação
-@st.cache_resource
-def load_geosampa_data():
-    local_files = ["SIRGAS_GPKG_distrito.zip", "SIRGAS_GPKG_distrito.gpkg"]
-    for filename in local_files:
-        if os.path.exists(filename):
-            try:
-                file_path = filename
-                if filename.endswith(".zip"):
-                    file_path = f"zip://{filename}"
-                
-                # Lê APENAS o GeoDataFrame, não converte para JSON ainda (economiza memória)
-                gdf = gpd.read_file(file_path)
-                
-                # Otimização: Filtra colunas desnecessárias se houver muitas
-                # gdf = gdf[['ds_nome', 'geometry']] # Exemplo se souber os nomes exatos
-                
-                if gdf.crs != "EPSG:4326":
-                    gdf = gdf.to_crs("EPSG:4326")
-                
-                # Cria uma coluna normalizada para busca rápida
-                # Tenta achar a coluna de nome (pode variar dependendo da versão do arquivo)
-                possible_cols = ['ds_nome', 'nm_distrito', 'name', 'NOME_DIST']
-                name_col = next((c for c in possible_cols if c in gdf.columns), None)
-                
-                if name_col:
-                    gdf['norm_name'] = gdf[name_col].apply(normalize_text)
-                
-                return gdf, name_col
-                
-            except Exception as e:
-                print(f"Erro no carregamento local: {e}")
-    
-    st.error("⚠️ ERRO: Base cartográfica não encontrada. Verifique se o arquivo .zip/.gpkg está no repositório.")
-    return None, None
-
 def get_district_from_db(cep_str):
     try:
         prefix = int(cep_str[:5]) 
@@ -225,73 +238,49 @@ def get_district_from_db(cep_str):
     return None, None
 
 def get_district_geometry_from_base(distrito_nome, base_data):
-    """
-    Busca o polígono filtrando o GeoDataFrame diretamente.
-    Retorna apenas o JSON do distrito específico, economizando memória.
-    """
     gdf, name_col = base_data
     if gdf is None or name_col is None: return None, None
     
     target_name = normalize_text(distrito_nome)
     
-    # Filtro eficiente do Pandas (muito mais rápido e leve que iterar JSON)
-    # Busca exata ou 'contains' se necessário
     match = gdf[gdf['norm_name'] == target_name]
-    
     if match.empty:
-        # Tenta busca parcial se exata falhar
         match = gdf[gdf['norm_name'].str.contains(target_name, na=False)]
     
     if not match.empty:
         try:
-            # Pega o primeiro resultado
             feature = match.iloc[0]
-            
-            # Converte APENAS este distrito para GeoJSON
-            # Isso é leve e não estoura a memória
             feature_json = json.loads(gpd.GeoSeries([feature.geometry]).to_json())
-            
-            # Ajusta estrutura para o formato que o Folium espera (FeatureCollection -> features[0])
             geojson_feature = feature_json['features'][0]
-            
-            # Calcula centróide
             centroid = feature.geometry.centroid
             return geojson_feature, [centroid.y, centroid.x]
         except Exception as e:
-            print(f"Erro ao extrair geometria: {e}")
+            print(f"Erro geometria: {e}")
             return None, [-23.5505, -46.6333]
-            
     return None, None
 
-# Carrega a base
-# NOTA: O carregamento agora é 'Lazy' ou eficiente via cache_resource
-# Isso impede o Timeout na inicialização do app
-BASE_DATA = load_geosampa_data()
-
 def processar_reporte(cep_input, tipo_problema):
-    # 1. Validação de Rate Limit
+    # 1. Rate Limit
     allowed, wait_time = check_rate_limit()
     if not allowed:
-        st.warning(f"⏳ Por favor, aguarde {wait_time} segundos antes de enviar outro reporte.")
+        st.warning(f"⏳ Aguarde {wait_time}s para enviar novamente.")
         return
 
-    # 2. Validação de Input
+    # 2. Input
     if not cep_input:
-        st.warning("⚠️ O campo CEP é obrigatório.")
+        st.warning("⚠️ Digite um CEP.")
         return
 
     clean_cep = "".join(filter(str.isdigit, str(cep_input)))
     if len(clean_cep) != 8:
-        st.error("❌ CEP Inválido. Digite os 8 números.")
+        st.error("❌ CEP Inválido.")
         return
 
     # 3. Processamento
     distrito_db, zona_db = get_district_from_db(clean_cep)
     
     if distrito_db:
-        # Busca geometria otimizada
         geojson, coords = get_district_geometry_from_base(distrito_db, BASE_DATA)
-        
         lat, lon = coords if coords else (-23.5505, -46.6333)
         
         st.session_state['reports'].append({
@@ -311,15 +300,14 @@ def processar_reporte(cep_input, tipo_problema):
         if geojson:
             st.session_state['geometries'][key] = geojson
         
-        st.success(f"✅ Reporte Registrado: {distrito_db} ({zona_db})")
+        st.success(f"✅ Registrado: {distrito_db} ({zona_db})")
     else:
-        st.error("❌ CEP não encontrado na área de cobertura.")
+        st.error("❌ CEP não encontrado na cobertura.")
 
-# --- INTERFACE PRINCIPAL ---
+# --- INTERFACE ---
 
 st.title("Monitor de Colapso Urbano")
 
-# BANNER DE PUBLICIDADE (TOPO)
 st.markdown("""
 <div class="ad-banner">
     <b>ESPAÇO PUBLICITÁRIO</b><br>
@@ -333,14 +321,14 @@ with col1:
     st.subheader("Reportar Ocorrência")
     
     tipo_problema = st.radio(
-        "Selecione o problema:",
+        "Problema:",
         ["Falta de Luz", "Falta de Água"],
         horizontal=True
     )
     
     cep_input = st.text_input("CEP (Somente números)", placeholder="00000000", max_chars=8)
     
-    if st.button("📢 Confirmar e Enviar"):
+    if st.button("📢 Confirmar"):
         processar_reporte(cep_input, tipo_problema)
     
     st.markdown("---")
@@ -379,7 +367,7 @@ with col1:
             }
         )
     else:
-        st.info(f"Sistema Operante. Sem reportes de {tipo_problema} nas últimas 96h.")
+        st.info(f"Sem reportes de {tipo_problema} recentes.")
 
 with col2:
     m = folium.Map(
